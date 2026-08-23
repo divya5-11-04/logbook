@@ -1,0 +1,6 @@
+node_modules
+.next
+.env
+.env.local
+all_job_post.csv
+.DS_Store
