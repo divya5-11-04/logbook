@@ -2,17 +2,6 @@ import { NextResponse } from "next/server";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 import { createClient as createServerClient } from "@/lib/supabase/server";
 
-const supabaseAdmin = createSupabaseClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!,
-  {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false,
-    },
-  }
-);
-
 async function callGemini(system: string, userMsg: string) {
   const apiKey = process.env.GEMINI_API_KEY;
 
@@ -47,7 +36,8 @@ async function callGemini(system: string, userMsg: string) {
   const data = await res.json();
 
   if (!res.ok) {
-    console.error("Gemini error:", data);
+    console.error("Gemini API error:", data);
+
     throw new Error(
       data?.error?.message ||
         `Gemini request failed with status ${res.status}`
@@ -64,12 +54,6 @@ async function callGemini(system: string, userMsg: string) {
   return text;
 }
 
-/**
- * Simple deterministic category matching.
- *
- * This avoids making the entire growth feature depend on Gemini.
- * Gemini can still provide the explanation later.
- */
 function classifyRole(
   targetRole: string,
   categories: { slug: string; label: string }[]
@@ -102,7 +86,6 @@ function classifyRole(
 
     "business-development": [
       "business development",
-      "business development manager",
       "partnership",
       "partnerships",
       "growth manager",
@@ -121,7 +104,7 @@ function classifyRole(
 
     hr: [
       "human resources",
-      "hr ",
+      "hr",
       "recruiter",
       "recruitment",
       "talent acquisition",
@@ -195,31 +178,66 @@ function classifyRole(
     ],
   };
 
+  // Prefer longer/more specific matches first.
+  const matches: { slug: string; length: number }[] = [];
+
   for (const category of categories) {
     const keywords = rules[category.slug] || [];
 
     for (const keyword of keywords) {
       if (role.includes(keyword)) {
-        return category.slug;
+        matches.push({
+          slug: category.slug,
+          length: keyword.length,
+        });
       }
     }
   }
 
-  // For an unknown role, prefer Information Technology if available.
-  const itCategory = categories.find(
+  if (matches.length > 0) {
+    matches.sort((a, b) => b.length - a.length);
+    return matches[0].slug;
+  }
+
+  const it = categories.find(
     (category) => category.slug === "information-technology"
   );
 
-  return itCategory?.slug || categories[0]?.slug;
+  return it?.slug || categories[0]?.slug;
 }
 
 export async function POST() {
   try {
-    // ============================================================
-    // 1. Authenticated user client
-    // ============================================================
+    // ------------------------------------------------------------
+    // Create clients at request time, NOT at module/build time.
+    // ------------------------------------------------------------
     const supabase = createServerClient();
 
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+    if (!supabaseUrl) {
+      throw new Error("NEXT_PUBLIC_SUPABASE_URL is not configured");
+    }
+
+    if (!serviceRoleKey) {
+      throw new Error("SUPABASE_SERVICE_ROLE_KEY is not configured");
+    }
+
+    const supabaseAdmin = createSupabaseClient(
+      supabaseUrl,
+      serviceRoleKey,
+      {
+        auth: {
+          autoRefreshToken: false,
+          persistSession: false,
+        },
+      }
+    );
+
+    // ------------------------------------------------------------
+    // 1. Authentication
+    // ------------------------------------------------------------
     const {
       data: { user },
       error: authError,
@@ -244,9 +262,9 @@ export async function POST() {
       );
     }
 
-    // ============================================================
-    // 2. Get profile
-    // ============================================================
+    // ------------------------------------------------------------
+    // 2. Profile
+    // ------------------------------------------------------------
     const { data: profile, error: profileError } = await supabase
       .from("profiles")
       .select("target_role")
@@ -274,9 +292,9 @@ export async function POST() {
       );
     }
 
-    // ============================================================
-    // 3. Get user's entries
-    // ============================================================
+    // ------------------------------------------------------------
+    // 3. User entries / existing skills
+    // ------------------------------------------------------------
     const { data: entries, error: entriesError } = await supabase
       .from("entries")
       .select("skills")
@@ -297,26 +315,26 @@ export async function POST() {
     if (!entries || entries.length === 0) {
       return NextResponse.json(
         {
-          error: "No entries logged yet. Log at least one project first.",
+          error:
+            "No entries logged yet. Log at least one project first.",
         },
         { status: 400 }
       );
     }
 
-    // ============================================================
-    // 4. Normalize user's existing skills
-    // ============================================================
     const mySkills = new Set(
       entries
         .flatMap((entry) => entry.skills || [])
-        .filter((skill): skill is string => typeof skill === "string")
+        .filter(
+          (skill): skill is string => typeof skill === "string"
+        )
         .map((skill) => skill.trim().toLowerCase())
         .filter(Boolean)
     );
 
-    // ============================================================
-    // 5. Read shared categories with service-role client
-    // ============================================================
+    // ------------------------------------------------------------
+    // 4. Categories
+    // ------------------------------------------------------------
     const { data: categories, error: categoriesError } =
       await supabaseAdmin
         .from("categories")
@@ -337,25 +355,27 @@ export async function POST() {
     if (!categories || categories.length === 0) {
       return NextResponse.json(
         {
-          error: "No categories found in the database.",
+          error: "No categories found in database",
         },
         { status: 500 }
       );
     }
 
-    // ============================================================
-    // 6. Deterministically classify target role
-    // ============================================================
+    // ------------------------------------------------------------
+    // 5. Determine category
+    // ------------------------------------------------------------
     const categorySlug = classifyRole(
       profile.target_role,
       categories
     );
 
-    const category = categories.find(
-      (item) => item.slug === categorySlug
-    );
+    const category =
+      categories.find(
+        (item) => item.slug === categorySlug
+      ) || null;
 
-    const categoryLabel = category?.label || categorySlug;
+    const categoryLabel =
+      category?.label || categorySlug;
 
     console.log("Growth category:", {
       targetRole: profile.target_role,
@@ -363,9 +383,9 @@ export async function POST() {
       categoryLabel,
     });
 
-    // ============================================================
-    // 7. Read real job-skill frequencies
-    // ============================================================
+    // ------------------------------------------------------------
+    // 6. Read actual skill-frequency data
+    // ------------------------------------------------------------
     const { data: skillCounts, error: skillError } =
       await supabaseAdmin
         .from("category_skill_counts")
@@ -398,27 +418,24 @@ export async function POST() {
       );
     }
 
-    console.log("Skill data:", {
-      categorySlug,
-      rows: skillCounts.length,
-      topSkills: skillCounts.slice(0, 10),
-    });
+    // ------------------------------------------------------------
+    // 7. Deterministic ranking
+    // ------------------------------------------------------------
+    const jobCount =
+      skillCounts[0]?.category_job_count || 0;
 
-    // ============================================================
-    // 8. Determine job count
-    // ============================================================
-    const jobCount = skillCounts[0]?.category_job_count || 0;
-
-    // ============================================================
-    // 9. Rank skills the user does NOT already have
-    // ============================================================
     const ranked = skillCounts
       .filter((row) => {
-        if (!row.skill || typeof row.skill !== "string") {
+        if (
+          !row.skill ||
+          typeof row.skill !== "string"
+        ) {
           return false;
         }
 
-        return !mySkills.has(row.skill.trim().toLowerCase());
+        return !mySkills.has(
+          row.skill.trim().toLowerCase()
+        );
       })
       .slice(0, 8)
       .map((row) => ({
@@ -426,11 +443,13 @@ export async function POST() {
         count: row.skill_count,
       }));
 
-    console.log("Final ranked skills:", ranked);
+    console.log("Growth result:", {
+      categorySlug,
+      jobCount,
+      existingSkills: [...mySkills],
+      ranked,
+    });
 
-    // ============================================================
-    // 10. Nothing missing
-    // ============================================================
     if (ranked.length === 0) {
       return NextResponse.json({
         ranked: [],
@@ -443,50 +462,51 @@ export async function POST() {
       });
     }
 
-    // ============================================================
-    // 11. Gemini explanation is optional
-    // ============================================================
+    // ------------------------------------------------------------
+    // 8. Gemini explanation
+    // ------------------------------------------------------------
     let reasoning =
-      "These skills are the highest-frequency skills in the job-posting dataset that are not yet present in your logged work.";
+      "These are the most frequently occurring skills in the tracked job postings that are not yet present in your logged work.";
 
-    let next_step = `Focus next on ${ranked[0].skill}, which has the highest frequency among your current skill gaps.`;
-
-    const gapList = ranked
-      .map(
-        (item) =>
-          `${item.skill} (${item.count} of ${jobCount} postings)`
-      )
-      .join("; ");
-
-    const existingSkillList =
-      [...mySkills].sort().join(", ") || "None";
+    let next_step =
+      `Focus next on ${ranked[0].skill}, which is the highest-frequency missing skill.`;
 
     try {
+      const gapList = ranked
+        .map(
+          (item) =>
+            `${item.skill} (${item.count} of ${jobCount} postings)`
+        )
+        .join("; ");
+
+      const existingSkills =
+        [...mySkills].sort().join(", ") || "None";
+
       const explanation = await callGemini(
         `
 You are a concise career advisor.
 
-You are given a ranking calculated from real job-posting frequency data.
+The skill ranking has already been calculated from real job-posting data.
 
 Do not invent skills.
 Do not add skills.
-Do not reorder skills.
-Do not alter the counts.
+Do not reorder the ranking.
+Do not change the counts.
 
-Return only:
+Return ONLY valid JSON:
 {
   "reasoning": "2-3 concise sentences",
-  "next_step": "one concrete action for the highest-ranked skill"
+  "next_step": "one concrete action targeting the highest-ranked skill"
 }
         `,
         `
 Target role: ${profile.target_role}
-Matched category: ${categoryLabel}
+Category: ${categoryLabel}
 
 Existing skills:
-${existingSkillList}
+${existingSkills}
 
-Ranked missing skills:
+Missing skills ranked by frequency:
 ${gapList}
         `
       );
@@ -501,16 +521,15 @@ ${gapList}
         next_step = parsed.next_step;
       }
     } catch (error) {
-      // Gemini failure must NOT break skill recommendations.
       console.error(
-        "Gemini explanation failed. Returning database ranking anyway:",
+        "Gemini explanation failed. Keeping database ranking:",
         error
       );
     }
 
-    // ============================================================
-    // 12. Return result
-    // ============================================================
+    // ------------------------------------------------------------
+    // 9. Response
+    // ------------------------------------------------------------
     return NextResponse.json({
       ranked,
       jobCount,
@@ -519,13 +538,15 @@ ${gapList}
       next_step,
     });
   } catch (error) {
-    console.error("Unexpected growth route error:", error);
+    console.error("Growth route failed:", error);
 
     return NextResponse.json(
       {
         error: "Growth analysis failed.",
         details:
-          error instanceof Error ? error.message : "Unknown error",
+          error instanceof Error
+            ? error.message
+            : "Unknown error",
       },
       { status: 500 }
     );
