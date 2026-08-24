@@ -537,18 +537,20 @@ ${gapList}
       reasoning,
       next_step,
     });
-  } catch (error) {
-    console.error("Growth route failed:", error);
+ } catch (error: any) {
+  console.error("GROWTH_FATAL_ERROR", {
+    message: error?.message,
+    name: error?.name,
+    stack: error?.stack,
+    cause: error?.cause,
+  });
 
-    return NextResponse.json(
-      {
-        error: "Growth analysis failed.",
-        details:
-          error instanceof Error
-            ? error.message
-            : "Unknown error",
-      },
-      { status: 500 }
-    );
-  }
+  return NextResponse.json(
+    {
+      error: "Growth analysis failed.",
+      details: error?.message || "Unknown error",
+    },
+    { status: 500 }
+  );
+}
 }
