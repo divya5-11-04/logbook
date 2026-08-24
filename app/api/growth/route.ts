@@ -212,6 +212,12 @@ export async function POST() {
     // Create clients at request time, NOT at module/build time.
     // ------------------------------------------------------------
     const supabase = createServerClient();
+    console.log("ENV CHECK", {
+  supabaseUrl: !!process.env.NEXT_PUBLIC_SUPABASE_URL,
+  anonKey: !!process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+  serviceKey: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
+  geminiKey: !!process.env.GEMINI_API_KEY,
+});
 
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
